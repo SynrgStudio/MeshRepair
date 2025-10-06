@@ -764,8 +764,9 @@ namespace MeshRepairCLI
         static void PrintHeader()
         {
             PrintColored(@"-------------------------------------------------------------------
-MeshRepair v1.0.0 - https://github.com/arnasdev/Windows3MFRepairCLI
--------------------------------------------------------------------", ConsoleColor.Blue);
+MeshRepair V2.0.0 - https://github.com/SynrgStudio/MeshRepair", ConsoleColor.Blue);
+            PrintColored(@"MeshRepair v1.0.0 - https://github.com/arnasdev/Windows3MFRepairCLI", ConsoleColor.White);
+            PrintColored(@"-------------------------------------------------------------------", ConsoleColor.Blue);
         }
         #endregion
     }
