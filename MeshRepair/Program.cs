@@ -22,6 +22,7 @@ namespace MeshRepairCLI
         static readonly string OutputFilePathArg = "outputFilePath";
         static readonly string TimeoutSecondsArg = "timeoutSeconds";
         static readonly string CloneFolderHierarchyArg = "cloneFolderHierarchy";
+        static readonly string OutputFormatArg = "outputFormat";
         static readonly string HelpArg = "help";
 
         static string inputFilePath = "";
@@ -29,6 +30,7 @@ namespace MeshRepairCLI
         static int timeoutSeconds = 60 * 10;
         static bool cloneFolderHierarchy = true;
         static bool isDirectory = false;
+        static string outputFormat = "3mf";
 
         static async Task Main(string[] args)
         {
@@ -40,7 +42,23 @@ namespace MeshRepairCLI
             }
 #endif
             PrintHeader();
-            var arguments = ParseArguments(args);
+            
+            Dictionary<string, string> arguments;
+            
+            // If no arguments provided, enter interactive mode
+            if (args.Length == 0)
+            {
+                arguments = InteractiveMode();
+                if (arguments == null)
+                {
+                    return;
+                }
+            }
+            else
+            {
+                arguments = ParseArguments(args);
+            }
+            
             if (!ValidateArguments(arguments))
             {
                 return;
@@ -48,7 +66,10 @@ namespace MeshRepairCLI
 
             // Fix any path weirdness
             inputFilePath = Path.GetFullPath(inputFilePath);
-            outputFilePath = Path.GetFullPath(outputFilePath);
+            if (!string.IsNullOrEmpty(outputFilePath))
+            {
+                outputFilePath = Path.GetFullPath(outputFilePath);
+            }
 
             string[] paths;
             List<string> failedRepairs = new List<string>();
@@ -78,9 +99,12 @@ namespace MeshRepairCLI
                     paths = new string[] { inputFilePath };
                 }
 
+                int currentFileIndex = 0;
                 foreach(string file in paths)
                 {
-                    PrintColored($"\n{file}", ConsoleColor.Yellow);
+                    currentFileIndex++;
+                    string displayPath = isDirectory ? Path.GetFileName(file) : file;
+                    PrintColored($"\n[{currentFileIndex}/{paths.Length}] {displayPath}", ConsoleColor.Yellow);
 
                     // Construct the desired file path
                     string convertedFilePath;
@@ -96,7 +120,8 @@ namespace MeshRepairCLI
                         }
                         else
                         {
-                            convertedFilePath = Path.Combine(inputFilePath, "MeshRepair", relativePath);
+                            // Keep in the same folder structure, just change extension
+                            convertedFilePath = Path.Combine(inputFilePath, relativePath);
                         }
                     }
                     else
@@ -150,6 +175,23 @@ namespace MeshRepairCLI
                         if (!success)
                         {
                             failedRepairs.Add(convertedFilePath);
+                            continue;
+                        }
+
+                        // Convert to STL if requested
+                        if (outputFormat.Equals("stl", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string stlOutputPath = Path.ChangeExtension(convertedFilePath, ".stl");
+                            bool stlSuccess = await ConvertToSTL(convertedFilePath, stlOutputPath);
+                            if (stlSuccess)
+                            {
+                                // Delete the intermediate 3MF file
+                                File.Delete(convertedFilePath);
+                            }
+                            else
+                            {
+                                PrintColored($"\tFailed to convert to STL, keeping 3MF file", ConsoleColor.Yellow);
+                            }
                         }
                     }
                     else
@@ -263,6 +305,96 @@ namespace MeshRepairCLI
             catch (Exception ex)
             {
                 PrintColored($"\tAn error occurred: {ex.Message}", ConsoleColor.Red);
+                return false;
+            }
+        }
+        #endregion
+
+        #region STL Conversion
+        static async Task<bool> ConvertToSTL(string inputFilePath, string outputFilePath)
+        {
+            // Get the base directory of the application
+            string exeDirectory = AppDomain.CurrentDomain.BaseDirectory;
+
+            // Construct the path to PrusaSlicer.exe
+            string prusaSlicerPath = Path.Combine(exeDirectory, "PrusaSlicer", "prusa-slicer.exe");
+
+            // Check if the PrusaSlicer executable exists
+            if (!File.Exists(prusaSlicerPath))
+            {
+                Console.WriteLine($"\tPrusaSlicer not found at {prusaSlicerPath}");
+                return false;
+            }
+
+            // Construct the arguments to pass to the executable
+            string arguments = string.Join(" ", new string[]
+            {
+                "--export-stl",
+                "-o",
+                $"\"{outputFilePath}\"",
+                $"\"{inputFilePath}\""
+            });
+
+            // Set up the process start information
+            ProcessStartInfo startInfo = new ProcessStartInfo
+            {
+                FileName = prusaSlicerPath,
+                Arguments = arguments,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            try
+            {
+                using (Process process = new Process())
+                {
+                    process.StartInfo = startInfo;
+
+                    // Capture the output and error streams
+                    process.OutputDataReceived += (sender, e) =>
+                    {
+                        if (!string.IsNullOrEmpty(e.Data))
+                        {
+                            PrintColored($"\t{e.Data}", ConsoleColor.Yellow);
+                        }
+                    };
+
+                    process.ErrorDataReceived += (sender, e) =>
+                    {
+                        if (!string.IsNullOrEmpty(e.Data))
+                        {
+                            PrintColored($"\tError: {e.Data}", ConsoleColor.Red);
+                        }
+                    };
+
+                    // Start the process
+                    process.Start();
+
+                    // Begin reading the output streams
+                    process.BeginOutputReadLine();
+                    process.BeginErrorReadLine();
+
+                    // Wait for the process to exit
+                    await process.WaitForExitAsync();
+
+                    // Check the exit code to determine success
+                    if (process.ExitCode == 0)
+                    {
+                        PrintColored($"\tConverted to STL: {Path.GetFileName(outputFilePath)}", ConsoleColor.Green);
+                        return true;
+                    }
+                    else
+                    {
+                        PrintColored($"\tSTL conversion process exited with code {process.ExitCode}", ConsoleColor.Red);
+                        return false;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                PrintColored($"\tAn error occurred during STL conversion: {ex.Message}", ConsoleColor.Red);
                 return false;
             }
         }
@@ -413,6 +545,71 @@ namespace MeshRepairCLI
         #endregion
 
         #region Arg Parsing
+        static Dictionary<string, string> InteractiveMode()
+        {
+            var arguments = new Dictionary<string, string>();
+
+            try
+            {
+                // Input File/Folder
+                Console.Write("\nInput Folder or File: ");
+                string input = Console.ReadLine()?.Trim().Trim('\"');
+                if (string.IsNullOrEmpty(input))
+                {
+                    PrintColored("Input path is required.", ConsoleColor.Red);
+                    return null;
+                }
+                arguments[InputFilePathArg] = input;
+
+                // Output File/Folder (optional)
+                Console.Write("Output Folder (press Enter to use same location): ");
+                string output = Console.ReadLine()?.Trim().Trim('\"');
+                if (!string.IsNullOrEmpty(output))
+                {
+                    arguments[OutputFilePathArg] = output;
+                }
+
+                // Output Format
+                Console.Write("Convert to STL after repair? (Y/N, default: N): ");
+                string stlChoice = Console.ReadLine()?.Trim().ToUpper();
+                if (stlChoice == "Y" || stlChoice == "YES")
+                {
+                    arguments[OutputFormatArg] = "stl";
+                }
+                else
+                {
+                    arguments[OutputFormatArg] = "3mf";
+                }
+
+                // Additional options
+                Console.Write("Clone folder hierarchy? (Y/N, default: Y): ");
+                string cloneChoice = Console.ReadLine()?.Trim().ToUpper();
+                if (cloneChoice == "N" || cloneChoice == "NO")
+                {
+                    arguments[CloneFolderHierarchyArg] = "false";
+                }
+                else
+                {
+                    arguments[CloneFolderHierarchyArg] = "true";
+                }
+
+                Console.Write("Timeout per file in seconds (default: 600): ");
+                string timeout = Console.ReadLine()?.Trim();
+                if (!string.IsNullOrEmpty(timeout) && int.TryParse(timeout, out int timeoutValue))
+                {
+                    arguments[TimeoutSecondsArg] = timeout;
+                }
+
+                Console.WriteLine();
+                return arguments;
+            }
+            catch (Exception ex)
+            {
+                PrintColored($"Error in interactive mode: {ex.Message}", ConsoleColor.Red);
+                return null;
+            }
+        }
+
         static bool ValidateArguments(Dictionary<string, string> arguments)
         {
             if (arguments.Count == 0)
@@ -437,6 +634,14 @@ namespace MeshRepairCLI
             inputFilePath = GetArgumentValue(arguments, InputFilePathArg);
             outputFilePath = GetArgumentValue(arguments, OutputFilePathArg);
             timeoutSeconds = GetArgumentValue(arguments, TimeoutSecondsArg, timeoutSeconds);
+            outputFormat = GetArgumentValue(arguments, OutputFormatArg, "3mf").ToLower();
+
+            // Validate output format
+            if (outputFormat != "3mf" && outputFormat != "stl")
+            {
+                PrintColored($"Invalid output format '{outputFormat}'. Supported formats: 3mf, stl", ConsoleColor.Red);
+                return false;
+            }
 
             return true;
         }
@@ -447,6 +652,7 @@ namespace MeshRepairCLI
             Console.WriteLine($"--{InputFilePathArg}=<input_file_path>     Specify the path to an individual model or a folder of models to repair.");
             Console.WriteLine($"--{CloneFolderHierarchyArg}=<true>         Optional: If a folder of models is specified, clone the folder hierarchy with the repaired files. Default is true.");
             Console.WriteLine($"--{OutputFilePathArg}=<output_file_path>   Optional: Specify a folder to put the repaired files.");
+            Console.WriteLine($"--{OutputFormatArg}=<3mf|stl>              Optional: Specify output format (3mf or stl). Default is 3mf.");
             Console.WriteLine($"--{TimeoutSecondsArg}=<60>                 Optional: Specify how long to repair a model before giving up. Default is 60 seconds.");
             Console.WriteLine("--help                                      Show help information.");
         }
